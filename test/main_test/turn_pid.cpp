@@ -1,42 +1,56 @@
 
-#include <Arduino.h>
+// THERE IS NO WARRANTY FOR THE SOFTWARE, TO THE EXTENT PERMITTED BY APPLICABLE LAW. EXCEPT WHEN OTHERWISE STATED IN WRITING THE COPYRIGHT HOLDERS AND/OR
+// OTHER PARTIES PROVIDE THE SOFTWARE “AS IS” WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+// OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE SOFTWARE IS WITH THE CUSTOMER. SHOULD THE
+// SOFTWARE PROVE DEFECTIVE, THE CUSTOMER ASSUMES THE COST OF ALL NECESSARY SERVICING, REPAIR, OR CORRECTION EXCEPT TO THE EXTENT SET OUT UNDER THE HARDWARE WARRANTY IN THESE TERMS.
+
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <SPIFFS.h>
 #include <Wire.h>
 #include <ESP32Servo.h> // Change to the standard Servo library for ESP32
 
-volatile float RatePitch, RateRoll, RateYaw;
-float RateCalibrationPitch, RateCalibrationRoll, RateCalibrationYaw, AccXCalibration, AccYCalibration, AccZCalibration;
-
-int ESCfreq = 500;
-float PAngleRoll = 2;
-float PAnglePitch = PAngleRoll;
-float IAngleRoll = 0;
-float IAnglePitch = IAngleRoll;
-float DAngleRoll = 0.007;
-float DAnglePitch = DAngleRoll;
+// REPLACE WITH YOUR NETWORK CREDENTIALS
+// COnnect your PC/mobile to this wifi and open the IP address from the serial monitor in your browser.
+const char *ssid = "your_wifi_name";
+const char *password = "your_wifi_password";
 
 float PRateRoll = 0.625;
-float IRateRoll = 0;
+float IRateRoll = 2.1;
 float DRateRoll = 0.008;
-float PRatePitch = PRateRoll;
-float IRatePitch = IRateRoll;
-float DRatePitch = DRateRoll;
+
+float PAngleRoll = 2;
+float IAngleRoll = 0;
+float DAngleRoll = 0.007;
 
 float PRateYaw = 4;
 float IRateYaw = 3;
 float DRateYaw = 0;
 
+int ESCfreq = 500;
+
+float PRatePitch = PRateRoll;
+float IRatePitch = IRateRoll;
+float DRatePitch = DRateRoll;
+float PAnglePitch = PAngleRoll;
+float IAnglePitch = IAngleRoll;
+float DAnglePitch = DAngleRoll;
 uint32_t LoopTimer;
 float t = 0.004; // time cycle
+
+volatile float RatePitch, RateRoll, RateYaw;
+volatile float RateCalibrationPitch, RateCalibrationRoll, RateCalibrationYaw, AccXCalibration, AccYCalibration, AccZCalibration;
+int RateCalibrationNumber;
 
 Servo mot1;
 Servo mot2;
 Servo mot3;
 Servo mot4;
-
-const int mot1_pin = 17;
-const int mot2_pin = 18;
-const int mot3_pin = 8; // is 14 for some designed FC on perforated baords
-const int mot4_pin = 3;
+const int mot1_pin = 13;
+const int mot2_pin = 12;
+const int mot3_pin = 14; // 14 for perf board
+const int mot4_pin = 27;
 
 volatile uint32_t current_time;
 volatile uint32_t last_channel_1 = 0;
@@ -52,12 +66,29 @@ volatile uint32_t timer_4;
 volatile uint32_t timer_5;
 volatile uint32_t timer_6;
 volatile int ReceiverValue[6]; // Increase the array size to 6 for Channel 1 to Channel 6
-const int channel_1_pin = 37;
-const int channel_2_pin = 38;
-const int channel_3_pin = 39;
-const int channel_4_pin = 40;
-const int channel_5_pin = 41;
-const int channel_6_pin = 42;
+volatile int channel_1_pwm_prev;
+volatile int channel_2_pwm_prev;
+volatile int channel_3_pwm_prev;
+volatile int channel_4_pwm_prev;
+volatile int channel_1_pwm;
+volatile int channel_2_pwm;
+volatile int channel_3_pwm;
+volatile int channel_4_pwm;
+float b = 0.7;
+
+unsigned long channel_1_fs = 1500; // thro
+unsigned long channel_2_fs = 1500; // ail
+unsigned long channel_3_fs = 1000; // elev
+unsigned long channel_4_fs = 1500; // rudd
+unsigned long channel_5_fs = 1000; // gear, greater than 1500 = throttle cut
+unsigned long channel_6_fs = 1000; // aux1
+
+const int channel_1_pin = 34;
+const int channel_2_pin = 35;
+const int channel_3_pin = 32;
+const int channel_4_pin = 33;
+const int channel_5_pin = 25;
+const int channel_6_pin = 26;
 
 volatile float PtermRoll;
 volatile float ItermRoll;
@@ -84,6 +115,9 @@ volatile float PrevErrorRateRoll, PrevErrorRatePitch, PrevErrorRateYaw;
 volatile float PrevItermRateRoll, PrevItermRatePitch, PrevItermRateYaw;
 volatile float PIDReturn[] = {0, 0, 0};
 
+float complementaryAngleRoll = 0.0f;
+float complementaryAnglePitch = 0.0f;
+
 // Kalman filters for angle mode
 volatile float AccX, AccY, AccZ;
 volatile float AngleRoll, AnglePitch;
@@ -95,11 +129,7 @@ volatile float ErrorAngleRoll, ErrorAnglePitch;
 volatile float PrevErrorAngleRoll, PrevErrorAnglePitch;
 volatile float PrevItermAngleRoll, PrevItermAnglePitch;
 
-float complementaryAngleRoll = 0.0f;
-float complementaryAnglePitch = 0.0f;
-
 volatile float MotorInput1, MotorInput2, MotorInput3, MotorInput4;
-unsigned long lastRxPrintMs = 0;
 
 void kalman_1d(float KalmanState, float KalmanUncertainty, float KalmanInput, float KalmanMeasurement)
 {
@@ -199,7 +229,7 @@ void gyro_signals(void)
 {
     Wire.beginTransmission(0x68);
     Wire.write(0x1A);
-    Wire.write(0x03);
+    Wire.write(0x05);
     Wire.endTransmission();
     Wire.beginTransmission(0x68);
     Wire.write(0x1C);
@@ -260,10 +290,264 @@ void pid_equation(float Error, float P, float I, float D, float PrevError, float
     PIDReturn[2] = Iterm;
 }
 
+// WIFI tuning global code
+AsyncWebServer server(80);
+
+const char *PARAM_P_GAIN = "pGain"; // For Pitch & Roll RATE
+const char *PARAM_I_GAIN = "iGain";
+const char *PARAM_D_GAIN = "dGain";
+
+const char *PARAM_P_A_GAIN = "pAGain"; // For Pitch & Roll ANGLE
+const char *PARAM_I_A_GAIN = "iAGain";
+const char *PARAM_D_A_GAIN = "dAGain";
+
+const char *PARAM_P_YAW = "pYaw"; // For Yaw
+const char *PARAM_I_YAW = "iYaw";
+const char *PARAM_D_YAW = "dYaw";
+
+const char *PARAM_TIME_CYCLE = "tc"; // Computation time cycle
+
+// HTML web page to handle 6 input fields of PID gains
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html><head>
+  <title>ESP Input Form</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    function submitMessage() {
+      alert("Saved value to ESP SPIFFS");
+      setTimeout(function(){ document.location.reload(false); }, 500);
+    }
+  </script></head><body>
+
+     <form action="/get" target="hidden-form"><br>
+    ESP32 Webserver for PID Gain value tuning of Quadcopter 
+  </form><br><br>
+
+  <form action="/get" target="hidden-form">
+    P Pitch & Roll Gain (current value %pGain%): <input type="number" step="any" name="pGain">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+  <form action="/get" target="hidden-form">
+    I Pitch & Roll Gain (current value %iGain%): <input type="number" step="any" name="iGain">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+  <form action="/get" target="hidden-form">
+    D Pitch & Roll Gain (current value %dGain%): <input type="number" step="any" name="dGain">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+  <form action="/get" target="hidden-form">
+    P Pitch & Roll Angle Gain (current value %pAGain%): <input type="number" step="any" name="pAGain">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+    <form action="/get" target="hidden-form">
+    I Pitch & Roll Angle Gain (current value %iAGain%): <input type="number" step="any" name="iAGain">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+    <form action="/get" target="hidden-form">
+    D Pitch & Roll Angle Gain (current value %dAGain%): <input type="number" step="any" name="dAGain">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+  <form action="/get" target="hidden-form">
+    P Yaw Gain (current value %pYaw%): <input type="number" step="any" name="pYaw">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+  <form action="/get" target="hidden-form">
+    I Yaw Gain (current value %iYaw%): <input type="number" step="any" name="iYaw">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br>
+  <form action="/get" target="hidden-form">
+    D Yaw Gain (current value %dYaw%): <input type="number" step="any" name="dYaw">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br><br>
+    <form action="/get" target="hidden-form">
+    Time cycle (current value %tc%): <input type="number" step="any" name="tc">
+    <input type="submit" value="Submit" onclick="submitMessage()">
+  </form><br><br>
+
+  <iframe style="display:none" name="hidden-form"></iframe>
+</body></html>)rawliteral";
+
+void notFound(AsyncWebServerRequest *request)
+{
+    request->send(404, "text/plain", "Not found");
+}
+
+String readFile(fs::FS &fs, const char *path)
+{
+    Serial.printf("Reading file: %s\r\n", path);
+    File file = fs.open(path, "r");
+    if (!file || file.isDirectory())
+    {
+        Serial.println("- empty file or failed to open file");
+        return String();
+    }
+    Serial.println("- read from file:");
+    String fileContent;
+    while (file.available())
+    {
+        fileContent += String((char)file.read());
+    }
+    file.close();
+    Serial.println(fileContent);
+    return fileContent;
+}
+
+void writeFile(fs::FS &fs, const char *path, const char *message)
+{
+    Serial.printf("Writing file: %s\r\n", path);
+    File file = fs.open(path, "w");
+    if (!file)
+    {
+        Serial.println("- failed to open file for writing");
+        return;
+    }
+    if (file.print(message))
+    {
+        Serial.println("- file written");
+    }
+    else
+    {
+        Serial.println("- write failed");
+    }
+    file.close();
+}
+
+// Replaces placeholder with stored values
+String processor(const String &var)
+{
+    // Serial.println(var);
+    if (var == "pGain")
+    {
+        return readFile(SPIFFS, "/pGain.txt");
+    }
+    else if (var == "iGain")
+    {
+        return readFile(SPIFFS, "/iGain.txt");
+    }
+    else if (var == "dGain")
+    {
+        return readFile(SPIFFS, "/dGain.txt");
+    }
+    else if (var == "pAGain")
+    {
+        return readFile(SPIFFS, "/pAGain.txt");
+    }
+    else if (var == "iAGain")
+    {
+        return readFile(SPIFFS, "/iAGain.txt");
+    }
+    else if (var == "dAGain")
+    {
+        return readFile(SPIFFS, "/dAGain.txt");
+    }
+    else if (var == "pYaw")
+    {
+        return readFile(SPIFFS, "/pYaw.txt");
+    }
+    else if (var == "dYaw")
+    {
+        return readFile(SPIFFS, "/dYaw.txt");
+    }
+    else if (var == "iYaw")
+    {
+        return readFile(SPIFFS, "/iYaw.txt");
+    }
+    else if (var == "tc")
+    {
+        return readFile(SPIFFS, "/tc.txt");
+    }
+}
+
 void setup(void)
 {
 
     Serial.begin(115200);
+
+    // WIFI server setup START
+    //  Initialize SPIFFS
+#ifdef ESP32
+    if (!SPIFFS.begin(true))
+    {
+        Serial.println("An Error has occurred while mounting SPIFFS");
+        return;
+    }
+#else
+    if (!SPIFFS.begin())
+    {
+        Serial.println("An Error has occurred while mounting SPIFFS");
+        return;
+    }
+#endif
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+    if (WiFi.waitForConnectResult() != WL_CONNECTED)
+    {
+        Serial.println("WiFi Failed!");
+        return;
+    }
+    Serial.println();
+    Serial.print("IP Address: ");
+
+    Serial.println(WiFi.localIP());
+    delay(2000);
+    // Send web page with input fields to client
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+              { request->send_P(200, "text/html", index_html, processor); });
+
+    // Send a GET request to <ESP_IP>/get?inputString=<inputMessage>
+    server.on("/get", HTTP_GET, [](AsyncWebServerRequest *request)
+              {
+    String inputMessage;
+    // GET P Gain value on <ESP_IP>/get?pGain=<inputMessage>
+if (request->hasParam(PARAM_P_GAIN)) {
+    inputMessage = request->getParam(PARAM_P_GAIN)->value();
+    writeFile(SPIFFS, "/pGain.txt", inputMessage.c_str());
+}
+// GET I Gain value on <ESP_IP>/get?iGain=<inputMessage>
+else if (request->hasParam(PARAM_I_GAIN)) {
+    inputMessage = request->getParam(PARAM_I_GAIN)->value();
+    writeFile(SPIFFS, "/iGain.txt", inputMessage.c_str());
+}
+// GET D Gain value on <ESP_IP>/get?dGain=<inputMessage>
+else if (request->hasParam(PARAM_D_GAIN)) {
+    inputMessage = request->getParam(PARAM_D_GAIN)->value();
+    writeFile(SPIFFS, "/dGain.txt", inputMessage.c_str());
+}
+else if (request->hasParam(PARAM_P_A_GAIN)) {
+    inputMessage = request->getParam(PARAM_P_A_GAIN)->value();
+    writeFile(SPIFFS, "/pAGain.txt", inputMessage.c_str());
+}
+else if (request->hasParam(PARAM_I_A_GAIN)) {
+    inputMessage = request->getParam(PARAM_I_A_GAIN)->value();
+    writeFile(SPIFFS, "/iAGain.txt", inputMessage.c_str());
+}
+else if (request->hasParam(PARAM_D_A_GAIN)) {
+    inputMessage = request->getParam(PARAM_D_A_GAIN)->value();
+    writeFile(SPIFFS, "/dAGain.txt", inputMessage.c_str());
+}
+else if (request->hasParam(PARAM_P_YAW)) {
+    inputMessage = request->getParam(PARAM_P_YAW)->value();
+    writeFile(SPIFFS, "/pYaw.txt", inputMessage.c_str());
+  } else if (request->hasParam(PARAM_I_YAW)) {
+    inputMessage = request->getParam(PARAM_I_YAW)->value();
+    writeFile(SPIFFS, "/iYaw.txt", inputMessage.c_str());
+  } else if (request->hasParam(PARAM_D_YAW)) {
+    inputMessage = request->getParam(PARAM_D_YAW)->value();
+    writeFile(SPIFFS, "/dYaw.txt", inputMessage.c_str());
+  }
+ else if (request->hasParam(PARAM_TIME_CYCLE)) {
+    inputMessage = request->getParam(PARAM_TIME_CYCLE)->value();
+    writeFile(SPIFFS, "/tc.txt", inputMessage.c_str());
+  }
+    else {
+      inputMessage = "No message sent";
+    }
+    Serial.println(inputMessage);
+    request->send(200, "text/text", inputMessage); });
+
+    server.onNotFound(notFound);
+    server.begin();
+    // WIFI server setup END
 
     int led_time = 100;
     pinMode(15, OUTPUT);
@@ -302,7 +586,7 @@ void setup(void)
     delay(100);
 
     Wire.setClock(400000);
-    Wire.begin(11, 10); // SDA, SCL pins for ESP32
+    Wire.begin();
     delay(250);
     Wire.beginTransmission(0x68);
     Wire.write(0x6B);
@@ -342,18 +626,48 @@ void setup(void)
     delay(500);
     digitalWrite(15, LOW);
     delay(500);
-    RateCalibrationRoll = 0.92;
-    RateCalibrationPitch = 0.23;
-    RateCalibrationYaw = -0.15;
-    AccXCalibration = 0.03;
-    AccYCalibration = 0.02;
-    AccZCalibration = -0.02;
+
+    RateCalibrationRoll = 0.8767;
+    RateCalibrationPitch = 0.1922;
+    RateCalibrationYaw = -0.1513;
+    AccXCalibration = 0.0580;
+    AccYCalibration = -0.0031;
+    AccZCalibration = -0.0148;
 
     LoopTimer = micros();
 }
 
 void loop(void)
 {
+
+    if (ReceiverValue[4] > 1500) // channel 5 for uploading values
+    {
+
+        PRateRoll = readFile(SPIFFS, "/pGain.txt").toFloat();
+        IRateRoll = readFile(SPIFFS, "/iGain.txt").toFloat();
+        DRateRoll = readFile(SPIFFS, "/dGain.txt").toFloat();
+
+        PRatePitch = PRateRoll;
+        IRatePitch = IRateRoll;
+        DRatePitch = DRateRoll;
+
+        PAngleRoll = readFile(SPIFFS, "/pAGain.txt").toFloat();
+        ;
+        IAngleRoll = readFile(SPIFFS, "/iAGain.txt").toFloat();
+        ;
+        DAngleRoll = readFile(SPIFFS, "/dAGain.txt").toFloat();
+        ;
+
+        PAnglePitch = PAngleRoll;
+        IAnglePitch = IAngleRoll;
+        DAnglePitch = DAngleRoll;
+
+        PRateYaw = readFile(SPIFFS, "/pYaw.txt").toFloat();
+        IRateYaw = readFile(SPIFFS, "/iYaw.txt").toFloat();
+        DRateYaw = readFile(SPIFFS, "/dYaw.txt").toFloat();
+
+        t = readFile(SPIFFS, "/tc.txt").toFloat();
+    }
 
     // enter your loop code here
     Wire.beginTransmission(0x68);
@@ -578,47 +892,99 @@ void loop(void)
     mot3.writeMicroseconds(MotorInput3);
     mot4.writeMicroseconds(MotorInput4);
 
-    // Print RX channels at 10Hz so values are readable in Serial Monitor.
-    if (millis() - lastRxPrintMs >= 100)
-    {
-        lastRxPrintMs = millis();
-        // Serial.print("RX CH1:");
-        // Serial.print(ReceiverValue[0]);
-        // Serial.print(" CH2:");
-        // Serial.print(ReceiverValue[1]);
-        Serial.print(" CH3:");
-        Serial.print(ReceiverValue[2]);
-        Serial.print(" CH4:");
-        Serial.print(ReceiverValue[3]);
-        Serial.print(" CH5:");
-        Serial.print(ReceiverValue[4]);
-        Serial.print(" CH6:");
-        Serial.print(ReceiverValue[5]);
-        Serial.print("ComplementaryAngleRoll: ");
-        Serial.print(complementaryAngleRoll);
-        Serial.print("ComplementaryAnglePitch: ");
-        Serial.print(complementaryAnglePitch);
-        Serial.print("  ");
-        Serial.print(MotorInput1);
-        Serial.print("  ");
-        Serial.print(MotorInput2);
-        Serial.print("  ");
-        Serial.print(MotorInput3);
-        Serial.print("  ");
-        Serial.print(MotorInput4);
-        Serial.println(" ");
-    }
+    // Reciever signals
+    //  Serial.print(ReceiverValue[0]);
+    //  Serial.print(" ");
+    //  Serial.print(ReceiverValue[1]);
+    //  Serial.print(" ");
+    //  Serial.print(ReceiverValue[2]);
+    //  Serial.print(" ");
+    //  Serial.print(ReceiverValue[3]);
+    //  Serial.print(" ");
 
-    // //Motor PWMs in us
-    //   Serial.print("MotVals-");
-    // Serial.print(MotorInput1);
+    // // Print PWM values with labels
+    // Serial.print("channel_1_pwm:");
+    // Serial.print(channel_1_pwm);
+    // Serial.print(" ");
+
+    // Serial.print("channel_2_pwm:");
+    // Serial.print(channel_2_pwm);
+    // Serial.print(" ");
+
+    // Serial.print("channel_3_pwm:");
+    // Serial.print(channel_3_pwm);
+    // Serial.print(" ");
+
+    // Serial.print("channel_4_pwm:");
+    // Serial.print(channel_4_pwm);
+    // Serial.print(" ");
+
+    //  // Print Receiver signals with labels
+    //   Serial.print("ReceiverValue_0:");
+    //   Serial.print(ReceiverValue[0]);
+    //   Serial.print(" ");
+
+    //   Serial.print("ReceiverValue_1:");
+    //   Serial.print(ReceiverValue[1]);
+    //   Serial.print(" ");
+
+    //   Serial.print("ReceiverValue_2:");
+    //   Serial.print(ReceiverValue[2]);
+    //   Serial.print(" ");
+
+    //   Serial.print("ReceiverValue_3:");
+    //   Serial.print(ReceiverValue[3]); // End the line for Serial Plotter to process
+
+    //   Serial.print("MotorInput1:");
+    //   Serial.print(MotorInput1);
+    //   Serial.print(" ");
+
+    //   Serial.print("MotorInput2:");
+    //   Serial.print(MotorInput2);
+    //   Serial.print(" ");
+
+    //   Serial.print("MotorInput3:");
+    //   Serial.print(MotorInput3);
+    //   Serial.print(" ");
+
+    //   Serial.print("MotorInput4:");
+    //   Serial.println(MotorInput4); // End the line for Serial Plotter to process
+
+    // Serial.print(channel_1_pwm);
+    //   Serial.print(" ");
+    // Serial.print(channel_2_pwm);
+    //   Serial.print(" ");
+    // Serial.print(channel_3_pwm);
+    //   Serial.print(" ");
+    // Serial.print(channel_4_pwm);
+    //   Serial.print(" ");
+
+    // Reciever signals
+
+    // Serial.println(ReceiverValue[0]);
+    // Serial.print(" ");
+    // Serial.print(ReceiverValue[1]);
+    // Serial.print(" ");
+    // Serial.print(ReceiverValue[2]);
+    // Serial.print(" ");
+    // Serial.println(ReceiverValue[3]);
     // Serial.print("  ");
-    // Serial.print(MotorInput2);
-    // Serial.print("  ");
-    // Serial.print(MotorInput3);
-    // Serial.print("  ");
-    // Serial.print(MotorInput4);
-    // Serial.println(" ");
+
+    // Serial.print(ReceiverValue[4]);
+    // Serial.print(" - ");
+    // Serial.print(ReceiverValue[5]);
+    // Serial.print(" - ");
+
+    // Motor PWMs in us
+    //  Serial.print("MotVals-");
+    //  Serial.print(MotorInput1);
+    //  Serial.print("  ");
+    //  Serial.print(MotorInput2);
+    //  Serial.print("  ");
+    //  Serial.print(MotorInput3);
+    //  Serial.print("  ");
+    //  Serial.print(MotorInput4);
+    //  Serial.print(" ");
 
     // //Reciever translated rates
     //   Serial.print(DesiredRateRoll);
@@ -646,7 +1012,6 @@ void loop(void)
     // Serial.print(RatePitch);
     // Serial.print("  ");
     // Serial.print(RateYaw);
-    // Serial.print("  ");
     // Serial.print(" -- ");
 
     // PID outputs
@@ -659,33 +1024,19 @@ void loop(void)
     //    Serial.print(" -- ");
 
     // Angles from MPU
-    // Serial.print("AngleRoll:");
-    // Serial.print(AngleRoll);
-    // Serial.print("  ");
-    // Serial.print("AnglePitch:");
-    // Serial.print(AnglePitch);
+    //  Serial.print("AngleRoll:");
+    //  Serial.print(AngleRoll);
+    //  //serial.print("  ");
+    //    Serial.print("AnglePitch:");
+    //  Serial.print(AnglePitch);
 
-    // Serial.print("KalmanAngleRoll:");
-    // Serial.print(KalmanAngleRoll);
-    // //serial.print("  ");
-    //   Serial.print("KalmanAnglePitch:");
-    // Serial.print(KalmanAnglePitch);
+    // // Serial.print("KalmanAngleRoll:");
+    // // Serial.print(KalmanAngleRoll);
+    // // //serial.print("  ");
+    // //   Serial.print("KalmanAnglePitch:");
+    // // Serial.print(KalmanAnglePitch);
 
-    // Serial.print("ComplementaryAngleRoll: ");
-    // Serial.print(complementaryAngleRoll);
-    // Serial.print("ComplementaryAnglePitch: ");
-    // Serial.println(complementaryAnglePitch);
-
-    // Serial.println(" ");
-
-    //  serial plotter comparison
-    // Serial.print(KalmanAngleRoll);
-    // Serial.print(" ");
-    // Serial.print(KalmanAnglePitch);
-    // Serial.print(" ");
-    // Serial.print(complementaryAngleRoll);
-    // Serial.print(" ");
-    // Serial.println(complementaryAnglePitch);
+    //  Serial.println(" ");
 
     while (micros() - LoopTimer < (t * 1000000))
         ;

@@ -1,4 +1,3 @@
-#include <Arduino.h>
 #include <Wire.h>
 #include <ESP32Servo.h>
 #include <math.h>
@@ -149,7 +148,6 @@ static const float GYRO_LSB_PER_DPS = 16.4f;
 static const float ACC_LSB_PER_G = 16384.0f;
 
 float gyroBiasX = 0, gyroBiasY = 0, gyroBiasZ = 0;
-float levelOffsetRollDeg = 0, levelOffsetPitchDeg = 0;
 
 static const int SIGN_GX = +1;
 static const int SIGN_GY = +1;
@@ -230,34 +228,6 @@ void mpuCalibrateGyro(int samples = 2000)
     }
 }
 
-void mpuCalibrateLevel(int samples = 400)
-{
-    float sumRoll = 0.0f, sumPitch = 0.0f;
-    int good = 0;
-
-    for (int i = 0; i < samples; i++)
-    {
-        int16_t axRaw, ayRaw, azRaw, gxRaw, gyRaw, gzRaw;
-        if (mpuReadAccelGyro(axRaw, ayRaw, azRaw, gxRaw, gyRaw, gzRaw))
-        {
-            float ax = axRaw / ACC_LSB_PER_G;
-            float ay = ayRaw / ACC_LSB_PER_G;
-            float az = azRaw / ACC_LSB_PER_G;
-
-            sumRoll += atan2f(ay, az) * RAD_TO_DEG;
-            sumPitch += atan2f(-ax, sqrtf(ay * ay + az * az)) * RAD_TO_DEG;
-            good++;
-        }
-        delay(2);
-    }
-
-    if (good > 0)
-    {
-        levelOffsetRollDeg = sumRoll / good;
-        levelOffsetPitchDeg = sumPitch / good;
-    }
-}
-
 struct PID
 {
     float kp, ki, kd;
@@ -304,14 +274,14 @@ struct PID
 };
 
 PID pidRoll(1.64f, 0.935f, 0.085f, -250, 250, 100);
-PID pidPitch(1.64f, 0.935f, 0., -250, 250, 100);
+PID pidPitch(1.64f, 0.935f, 0.085f, -250, 250, 100);
 PID pidYaw(0.05f, 0.05f, 0.0005f, -300, 300, 150);
 
 float KpAngleRoll = 4.0f;
 float KpAnglePitch = 4.0f;
 
-float rollTrimDeg = 0.0f;
-float pitchTrimDeg = 0.0f;
+float rollTrimDeg = 5.96f;
+float pitchTrimDeg = -5.34f;
 
 const float MAX_ANGLE_DEG = 30.0f;
 const float MAX_RATE_RP = 200.0f;
@@ -387,12 +357,6 @@ void setup()
     Serial.println("Dang calib gyro... DUNG YEN!");
     mpuCalibrateGyro(2000);
     Serial.println("Calib xong.");
-    Serial.println("Dang calib level... DAT MAY PHANG!");
-    mpuCalibrateLevel(500);
-    Serial.print("Level offset roll=");
-    Serial.print(levelOffsetRollDeg, 2);
-    Serial.print(" pitch=");
-    Serial.println(levelOffsetPitchDeg, 2);
 
     // Lấy góc ban đầu từ accel
     int16_t axRaw, ayRaw, azRaw, gxRaw, gyRaw, gzRaw;
@@ -402,8 +366,8 @@ void setup()
         float ay = ayRaw / ACC_LSB_PER_G;
         float az = azRaw / ACC_LSB_PER_G;
 
-        float rollAcc = atan2f(ay, az) * RAD2DEG - levelOffsetRollDeg;
-        float pitchAcc = atan2f(-ax, sqrtf(ay * ay + az * az)) * RAD2DEG - levelOffsetPitchDeg;
+        float rollAcc = atan2f(ay, az) * RAD2DEG;
+        float pitchAcc = atan2f(-ax, sqrtf(ay * ay + az * az)) * RAD2DEG;
 
         rollDeg = rollAcc;
         pitchDeg = pitchAcc;
@@ -427,13 +391,10 @@ void setup()
     delay(1500);
 
     LoopTimer = micros();
-    Serial.println("Setup xong -> vao loop dieu khien");
 }
 
 void loop()
 {
-    static uint32_t lastDbgMs = 0;
-
     while ((uint32_t)(micros() - LoopTimer) < LOOP_US)
     {
     }
@@ -478,8 +439,8 @@ void loop()
         float az = azRaw / ACC_LSB_PER_G;
 
         // Góc từ accel (deg)
-        float rollAcc = atan2f(ay, az) * RAD_TO_DEG - levelOffsetRollDeg;
-        float pitchAcc = atan2f(-ax, sqrtf(ay * ay + az * az)) * RAD_TO_DEG - levelOffsetPitchDeg;
+        float rollAcc = atan2f(ay, az) * RAD_TO_DEG;
+        float pitchAcc = atan2f(-ax, sqrtf(ay * ay + az * az)) * RAD_TO_DEG;
 
         // ====== “tin accel” theo độ gần 1g (chặn rung/tăng tốc) ======
         float aMag = sqrtf(ax * ax + ay * ay + az * az); // ~1.0 khi đứng yên
@@ -541,30 +502,4 @@ void loop()
     mot2.writeMicroseconds(motor2);
     mot3.writeMicroseconds(motor3);
     mot4.writeMicroseconds(motor4);
-
-    // uint32_t nowMs = millis();
-    // if ((uint32_t)(nowMs - lastDbgMs) >= 500)
-    // {
-    //     lastDbgMs = nowMs;
-    //     Serial.print("loop ok | arm=");
-    //     Serial.print(armed ? 1 : 0);
-    //     Serial.print(" ch3(thr)=");
-    //     Serial.print(rcThrottle);
-    //     Serial.print(" ch5(arm)=");
-    //     Serial.print(rcArm);
-    //     Serial.print(" mpu=");
-    //     Serial.print(ok ? "OK" : "ERR");
-    //     Serial.print(" roll=");
-    //     Serial.print(rollDeg, 2);
-    //     Serial.print(" pitch=");
-    //     Serial.print(pitchDeg, 2);
-    //     Serial.print(" M1 = ");
-    //     Serial.print(motor1);
-    //     Serial.print(" M2 = ");
-    //     Serial.print(motor2);
-    //     Serial.print(" M3 = ");
-    //     Serial.print(motor3);
-    //     Serial.print(" M4 = ");
-    //     Serial.println(motor4);
-    // }
 }
